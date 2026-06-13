@@ -331,7 +331,7 @@ export function encodePic(data: Float64Array, dataSize: number, result: Uint8Arr
   return ri;
 }
 
-export function decodePic(data: Uint8Array, dataSize: number, result: Float64Array): number {
+export function decodePic(data: Uint8Array, dataSize: number, result: Appender): number {
   let ri = 0;
   const dec = new IntDecoder(data, 0);
 
@@ -339,7 +339,8 @@ export function decodePic(data: Uint8Array, dataSize: number, result: Float64Arr
     if (dec.pos === dataSize - 1 && dec.half) {
       if ((data[dec.pos] & 0xf) !== 0x8) break;
     }
-    result[ri++] = dec.next();
+    result.append(dec.next());
+    ri++;
   }
 
   return ri;

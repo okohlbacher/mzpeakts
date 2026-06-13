@@ -13,7 +13,7 @@ import {
 import { FloatArray, IntArray } from "apache-arrow/type";
 import { bigIntToNumber } from "apache-arrow/util/bigint";
 import { betweenSorted, intervalOverlaps, Span1D, Span1DBigInt } from "./utils";
-import { decodeLinear, ACC_NUMPRESS_LINEAR, ACC_NUMPRESS_SLOF, ArrowArrayAppender as NumpressArrowAppender, decodeSlof } from "./numpress"
+import { decodeLinear, ACC_NUMPRESS_LINEAR, ACC_NUMPRESS_PIC, ACC_NUMPRESS_SLOF, ArrowArrayAppender as NumpressArrowAppender, decodeSlof, decodePic } from "./numpress"
 
 export type DataArrays = Record<string, FloatArray | IntArray | BigInt64Array | string[]>;
 
@@ -73,6 +73,7 @@ const NO_COMPRESSION_CURIE = "MS:1000576";
 const DELTA_CURIE = "MS:1003089";
 const NUMPRESS_LINEAR_CURIE = ACC_NUMPRESS_LINEAR;
 const NUMPRESS_SLOF_CURIE = ACC_NUMPRESS_SLOF;
+const NUMPRESS_PIC_CURIE = ACC_NUMPRESS_PIC;
 
 // ---- Internal helpers ----
 
@@ -887,8 +888,38 @@ export class ChunkLayoutReader extends BaseLayoutReader {
 
     const queryRange = this.queryCoordinateRange;
 
-    let numpressLinearCol = null
-    let numpressLinearColIdx = null
+    // Numpress main-axis values live in a separate byte-array column (not chunkValues).
+    // The column is identical for every selected row, so look it up by transform CURIE
+    // and cache it. Linear, SLOF and PIC all share this lookup; only the per-row
+    // decoder differs.
+    const numpressCols = new Map<
+      string,
+      { idx: number; col: Arrow.Vector<Arrow.Struct> | null }
+    >();
+    const numpressColFor = (transform: string) => {
+      let c = numpressCols.get(transform);
+      if (c === undefined) {
+        const entriesOf = this.arrayIndex
+          .entriesFor(this.mainAxisEntry!.arrayTypeCURIE)
+          .filter((e) => e.transform == transform);
+        if (entriesOf.length == 0)
+          throw new Error(`Numpress chunk encoding found, but could not find byte array`);
+        const entryFor = entriesOf[0];
+        // Robustness: the byte-array column must have a concrete schema index and
+        // resolve to a real child column — otherwise getChildAt would bind the wrong
+        // (or a null) column and decode garbage.
+        if (entryFor.schemaIndex == null)
+          throw new Error(`Numpress byte-array column for ${transform} has no schema index`);
+        const col = rootStruct.getChildAt(entryFor.schemaIndex);
+        if (col == null)
+          throw new Error(
+            `Numpress byte-array column (schema index ${entryFor.schemaIndex}) not found`,
+          );
+        c = { idx: entryFor.schemaIndex, col };
+        numpressCols.set(transform, c);
+      }
+      return c;
+    };
     const visitedCols = new Set();
     for (const rowIdx of selectedRows) {
       visitedCols.clear()
@@ -923,27 +954,41 @@ export class ChunkLayoutReader extends BaseLayoutReader {
             );
           decoded = decodeDelta(startValue, chunkValues);
           break;
-        case NUMPRESS_LINEAR_CURIE:
-          if (numpressLinearCol == null) {
-            const entriesOf = this.arrayIndex
-              .entriesFor(this.mainAxisEntry.arrayTypeCURIE)
-              .filter((e) => e.transform == ACC_NUMPRESS_LINEAR);
-            if (entriesOf.length == 0) throw new Error(`Numpress chunk encoding found, but could not find byte array`)
-            const entryFor = entriesOf[0]
-            numpressLinearColIdx = entryFor.schemaIndex;
-            numpressLinearCol = rootStruct.getChildAt(entryFor.schemaIndex!);
-          }
-          visitedCols.add(numpressLinearColIdx)
-          const buf = numpressLinearCol!.get(rowIdx) as Arrow.Vector<Arrow.Uint8> | null;
-          if (buf == null) throw new Error(`Numpress byte array is expected, found null`)
+        case NUMPRESS_LINEAR_CURIE: {
+          const { idx, col } = numpressColFor(ACC_NUMPRESS_LINEAR);
+          visitedCols.add(idx);
+          const buf = col!.get(rowIdx) as Arrow.Vector<Arrow.Uint8> | null;
+          if (buf == null) throw new Error(`Numpress byte array is expected, found null`);
           const acc = new NumpressArrowAppender();
-          decodeLinear(buf.toArray(), buf.length, acc);
+          // decodeLinear returns -1 on a truncated/malformed buffer; surface that as a
+          // typed corrupt-file error instead of silently building a partial array.
+          if (decodeLinear(buf.toArray(), buf.length, acc) < 0)
+            throw new Error(`Corrupt Numpress Linear buffer at row ${rowIdx}`);
           decoded = acc.buildArrow();
           break;
-        case NUMPRESS_SLOF_CURIE:
-          throw new Error(
-            `Numpress decoding not implemented (encoding: ${encoding})`,
-          );
+        }
+        case NUMPRESS_SLOF_CURIE: {
+          const { idx, col } = numpressColFor(ACC_NUMPRESS_SLOF);
+          visitedCols.add(idx);
+          const buf = col!.get(rowIdx) as Arrow.Vector<Arrow.Uint8> | null;
+          if (buf == null) throw new Error(`Numpress byte array is expected, found null`);
+          const acc = new NumpressArrowAppender();
+          // decodeSlof returns -1 on a truncated/odd-length buffer.
+          if (decodeSlof(buf.toArray(), buf.length, acc) < 0)
+            throw new Error(`Corrupt Numpress SLOF buffer at row ${rowIdx}`);
+          decoded = acc.buildArrow();
+          break;
+        }
+        case NUMPRESS_PIC_CURIE: {
+          const { idx, col } = numpressColFor(ACC_NUMPRESS_PIC);
+          visitedCols.add(idx);
+          const buf = col!.get(rowIdx) as Arrow.Vector<Arrow.Uint8> | null;
+          if (buf == null) throw new Error(`Numpress byte array is expected, found null`);
+          const acc = new NumpressArrowAppender();
+          decodePic(buf.toArray(), buf.length, acc);
+          decoded = acc.buildArrow();
+          break;
+        }
         default:
           throw new Error(`Unknown chunk encoding: ${encoding}`);
       }
@@ -967,6 +1012,22 @@ export class ChunkLayoutReader extends BaseLayoutReader {
         if (entry.transform === NUMPRESS_SLOF_CURIE) {
           const buf = new NumpressArrowAppender()
           decodeSlof(
+            (secValues as Arrow.Vector<Arrow.Uint8>).toArray(),
+            secValues.length,
+            buf,
+          );
+          resultSecondary[name].push(buf.buildArrow());
+        } else if (entry.transform === NUMPRESS_PIC_CURIE) {
+          const buf = new NumpressArrowAppender()
+          decodePic(
+            (secValues as Arrow.Vector<Arrow.Uint8>).toArray(),
+            secValues.length,
+            buf,
+          );
+          resultSecondary[name].push(buf.buildArrow());
+        } else if (entry.transform === NUMPRESS_LINEAR_CURIE) {
+          const buf = new NumpressArrowAppender()
+          decodeLinear(
             (secValues as Arrow.Vector<Arrow.Uint8>).toArray(),
             secValues.length,
             buf,
