@@ -46,3 +46,20 @@ test("streamPointArrays is byte-identical to enumerate()+pack", async () => {
     }
   }
 });
+
+test("streamPointArrays(mzFloat32) yields f32 m/z equal (within f32) to the f64 stream", async () => {
+  const dr32 = await openDataReader();
+  const f32 = new Map<number, Float32Array>();
+  for await (const s of dr32!.streamPointArrays(true)) {
+    expect(s.mz).toBeInstanceOf(Float32Array);
+    f32.set(s.index, s.mz as Float32Array);
+  }
+  const dr64 = await openDataReader();
+  for await (const s of dr64!.streamPointArrays(false)) {
+    expect(s.mz).toBeInstanceOf(Float64Array);
+    const m32 = f32.get(s.index)!;
+    expect(m32.length).toBe(s.mz.length);
+    for (let k = 0; k < m32.length; k++) expect(m32[k]).toBe(Math.fround(s.mz[k]!)); // exact f32 of the f64
+  }
+  expect(f32.size).toBeGreaterThan(0);
+});
