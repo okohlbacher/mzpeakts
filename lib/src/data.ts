@@ -1325,9 +1325,9 @@ export class DataArraysReader {
 
   /** Generic per-entry fallback used by {@link streamPointArrays} for non-POINT layouts
    *  (chunk/numpress need per-row decode) or an unexpected schema. */
-  private async *streamArraysGeneric(): AsyncGenerator<{
+  private async *streamArraysGeneric(mzFloat32 = false): AsyncGenerator<{
     index: number;
-    mz: Float64Array;
+    mz: Float64Array | Float32Array;
     intensity: Float32Array;
   }> {
     for await (const [idx, table] of this.enumerate()) {
@@ -1340,7 +1340,8 @@ export class DataArraysReader {
       const mzRaw = packed[MZ_ARRAY_NAME] as unknown as ArrayLike<number> | undefined;
       const inRaw = packed[INTENSITY_ARRAY_NAME] as unknown as ArrayLike<number> | undefined;
       if (!mzRaw || !inRaw) continue;
-      yield { index: Number(idx), mz: Float64Array.from(mzRaw), intensity: Float32Array.from(inRaw) };
+      const mz = mzFloat32 ? Float32Array.from(mzRaw) : Float64Array.from(mzRaw);
+      yield { index: Number(idx), mz, intensity: Float32Array.from(inRaw) };
     }
   }
 
@@ -1358,14 +1359,18 @@ export class DataArraysReader {
    * view can't be corrupted; the common dense profile case (no transform, no nulls) never
    * copies until the final typed-array conversion. Chunk/numpress layouts and any unexpected
    * schema fall back to {@link streamArraysGeneric}.
+   *
+   * @param mzFloat32 yield m/z as a Float32Array instead of Float64Array. For consumers that
+   * only need ~1e-4 Da precision (ion-image recompute), this halves the m/z footprint and
+   * avoids an f64→f32 downcast downstream. Default false (full f64, e.g. spectrum display).
    */
-  async *streamPointArrays(): AsyncGenerator<{
+  async *streamPointArrays(mzFloat32 = false): AsyncGenerator<{
     index: number;
-    mz: Float64Array;
+    mz: Float64Array | Float32Array;
     intensity: Float32Array;
   }> {
     if (this.format !== BufferFormat.Point) {
-      yield* this.streamArraysGeneric();
+      yield* this.streamArraysGeneric(mzFloat32);
       return;
     }
     const ai = this.metadata.arrayIndex;
@@ -1373,7 +1378,7 @@ export class DataArraysReader {
     const intEntry = ai.entries.find((e) => e.arrayName === INTENSITY_ARRAY_NAME);
     if (!mzEntry || !intEntry) {
       // Unexpected schema — don't risk yielding the wrong columns.
-      yield* this.streamArraysGeneric();
+      yield* this.streamArraysGeneric(mzFloat32);
       return;
     }
     const models = this.spacingModels ?? undefined;
@@ -1394,9 +1399,10 @@ export class DataArraysReader {
     ) => {
       const mzV = applyXform(mzEntry, index, mzChunks.length === 1 ? mzChunks[0] : combineVectors(mzChunks));
       const intV = applyXform(intEntry, index, intChunks.length === 1 ? intChunks[0] : combineVectors(intChunks));
+      const mzRaw = mzV.toArray() as ArrayLike<number>;
       return {
         index: Number(index),
-        mz: Float64Array.from(mzV.toArray() as ArrayLike<number>),
+        mz: mzFloat32 ? Float32Array.from(mzRaw) : Float64Array.from(mzRaw),
         intensity: Float32Array.from(intV.toArray() as ArrayLike<number>),
       };
     };
