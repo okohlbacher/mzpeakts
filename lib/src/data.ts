@@ -71,6 +71,11 @@ export const NULL_ZERO_CURIE = "MS:1003901";
 
 const NO_COMPRESSION_CURIE = "MS:1000576";
 const DELTA_CURIE = "MS:1003089";
+
+// Human-readable CV array names used to pick the m/z + intensity columns in the fast
+// POINT-layout bulk path (matches packTableIntoDataArrays' field-name keys).
+const MZ_ARRAY_NAME = "m/z array";
+const INTENSITY_ARRAY_NAME = "intensity array";
 const NUMPRESS_LINEAR_CURIE = ACC_NUMPRESS_LINEAR;
 const NUMPRESS_SLOF_CURIE = ACC_NUMPRESS_SLOF;
 const NUMPRESS_PIC_CURIE = ACC_NUMPRESS_PIC;
@@ -130,6 +135,17 @@ function rootStructOf(
   batch: Arrow.RecordBatch,
 ): Arrow.Vector<Arrow.Struct> | null {
   return batch.getChildAt(0) as Arrow.Vector<Arrow.Struct> | null;
+}
+
+/** Deep-copy a Float vector (preserving nulls) so an in-place transform (nullToZero /
+ *  interpolateNulls, which mutate via .set on a slice VIEW) can't corrupt the shared batch
+ *  buffer. Only used on the rare transform path; the dense no-transform case stays zero-copy. */
+function copyFloatVector(
+  v: Arrow.Vector<Arrow.Float>,
+): Arrow.Vector<Arrow.Float> {
+  const acc = Arrow.makeBuilder({ type: v.type, nullValues: [null] });
+  for (let i = 0; i < v.length; i++) acc.append(v.get(i));
+  return acc.finish().toVector();
 }
 
 function indexVectorOf(
@@ -1305,6 +1321,128 @@ export class DataArraysReader {
 
   [Symbol.asyncIterator](): AsyncIterator<[bigint, Arrow.Table | ColumnMap]> {
     return this.enumerate();
+  }
+
+  /** Generic per-entry fallback used by {@link streamPointArrays} for non-POINT layouts
+   *  (chunk/numpress need per-row decode) or an unexpected schema. */
+  private async *streamArraysGeneric(): AsyncGenerator<{
+    index: number;
+    mz: Float64Array;
+    intensity: Float32Array;
+  }> {
+    for await (const [idx, table] of this.enumerate()) {
+      const t = table as unknown as {
+        schema?: unknown;
+        getChild?: (n: string) => unknown;
+      };
+      if (!t || !t.schema || typeof t.getChild !== "function") continue;
+      const packed = packTableIntoDataArrays(table as unknown as Arrow.Table);
+      const mzRaw = packed[MZ_ARRAY_NAME] as unknown as ArrayLike<number> | undefined;
+      const inRaw = packed[INTENSITY_ARRAY_NAME] as unknown as ArrayLike<number> | undefined;
+      if (!mzRaw || !inRaw) continue;
+      yield { index: Number(idx), mz: Float64Array.from(mzRaw), intensity: Float32Array.from(inRaw) };
+    }
+  }
+
+  /**
+   * FAST bulk stream of decoded (m/z, intensity) typed arrays per entry, bypassing the
+   * generic per-entry Arrow machinery (the `vectorEquals` whole-batch scan per entry, plus
+   * `take()` / `combineVectors` / per-entry `tableFromArrays` / `packTableIntoDataArrays`) —
+   * which measured ~16s of a ~38s cold ion-image render.
+   *
+   * POINT-layout only: points are stored sorted by entry index, so each entry is a
+   * CONTIGUOUS row run located by ONE linear pass over the (typed-array) index column per
+   * batch; entries that span a batch boundary are stitched. m/z + intensity are taken as
+   * Arrow slice VIEWS (zero-copy) and materialized once at the end. Columns carrying a value
+   * transform (null-to-zero / interpolate — both mutate in place) are deep-copied first so a
+   * view can't be corrupted; the common dense profile case (no transform, no nulls) never
+   * copies until the final typed-array conversion. Chunk/numpress layouts and any unexpected
+   * schema fall back to {@link streamArraysGeneric}.
+   */
+  async *streamPointArrays(): AsyncGenerator<{
+    index: number;
+    mz: Float64Array;
+    intensity: Float32Array;
+  }> {
+    if (this.format !== BufferFormat.Point) {
+      yield* this.streamArraysGeneric();
+      return;
+    }
+    const ai = this.metadata.arrayIndex;
+    const mzEntry = ai.entries.find((e) => e.arrayName === MZ_ARRAY_NAME);
+    const intEntry = ai.entries.find((e) => e.arrayName === INTENSITY_ARRAY_NAME);
+    if (!mzEntry || !intEntry) {
+      // Unexpected schema — don't risk yielding the wrong columns.
+      yield* this.streamArraysGeneric();
+      return;
+    }
+    const models = this.spacingModels ?? undefined;
+    const applyXform = (
+      entry: ArrayIndexEntry,
+      index: bigint,
+      v: Arrow.Vector<Arrow.Float>,
+    ): Arrow.Vector<Arrow.Float> => {
+      if (entry.transform === NULL_ZERO_CURIE) return nullToZero(copyFloatVector(v));
+      if (entry.transform === NULL_INTERPOLATE_CURIE && models?.has(index))
+        return interpolateNulls(copyFloatVector(v), models.get(index)!);
+      return v; // no transform → operate on the zero-copy view
+    };
+    const materialize = (
+      index: bigint,
+      mzChunks: Arrow.Vector<Arrow.Float>[],
+      intChunks: Arrow.Vector<Arrow.Float>[],
+    ) => {
+      const mzV = applyXform(mzEntry, index, mzChunks.length === 1 ? mzChunks[0] : combineVectors(mzChunks));
+      const intV = applyXform(intEntry, index, intChunks.length === 1 ? intChunks[0] : combineVectors(intChunks));
+      return {
+        index: Number(index),
+        mz: Float64Array.from(mzV.toArray() as ArrayLike<number>),
+        intensity: Float32Array.from(intV.toArray() as ArrayLike<number>),
+      };
+    };
+
+    // Carry for a run that reaches the end of a batch (may continue in the next one).
+    let carryIndex: bigint | null = null;
+    let carryMz: Arrow.Vector<Arrow.Float>[] = [];
+    let carryInt: Arrow.Vector<Arrow.Float>[] = [];
+
+    for await (const batch of streamArrowBatches(this.handle, undefined, undefined, {
+      batchSize: 32768,
+    })) {
+      const root = rootStructOf(batch);
+      if (root == null) continue;
+      const idxArr = indexVectorOf(root).toArray() as unknown as { [i: number]: bigint; length: number };
+      const mzVec = root.getChild(mzEntry.fieldName) as Arrow.Vector<Arrow.Float> | null;
+      const intVec = root.getChild(intEntry.fieldName) as Arrow.Vector<Arrow.Float> | null;
+      if (mzVec == null || intVec == null) continue;
+      const n = idxArr.length;
+      let s = 0;
+      while (s < n) {
+        const idx = idxArr[s];
+        let e = s + 1;
+        while (e < n && idxArr[e] === idx) e++;
+        const mzSlice = mzVec.slice(s, e);
+        const intSlice = intVec.slice(s, e);
+        if (carryIndex !== null && carryIndex === idx) {
+          carryMz.push(mzSlice);
+          carryInt.push(intSlice);
+        } else {
+          if (carryIndex !== null) yield materialize(carryIndex, carryMz, carryInt);
+          carryIndex = idx;
+          carryMz = [mzSlice];
+          carryInt = [intSlice];
+        }
+        if (e < n) {
+          // Run ends inside this batch → complete; flush and clear the carry.
+          yield materialize(carryIndex, carryMz, carryInt);
+          carryIndex = null;
+          carryMz = [];
+          carryInt = [];
+        }
+        s = e;
+      }
+    }
+    if (carryIndex !== null) yield materialize(carryIndex, carryMz, carryInt);
   }
 }
 
