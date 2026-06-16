@@ -91,24 +91,29 @@ async function* streamArrowBatches(
   const options = options_ ?? { batchSize: 2048 };
   options.rowGroups = rowGroups;
   if (columns) options.columns = columns;
-  const tabStream = (await handle.stream(options)).values();
+  // Use getReader() instead of ReadableStream.values() — values() requires Safari 16.4+
+  // but WKWebView on older macOS lacks it. getReader() is universally available.
+  const reader = (await handle.stream(options)).getReader();
   const mem = wasmMemory();
-  while (true) {
-    let batch = await tabStream.next();
-    if (batch.done) break;
-    let wBatch = batch.value;
-    if (wBatch) {
-      let ffi = wBatch.intoFFI();
-      let arrowBat = ArrowFFI.parseRecordBatch(
-        mem.buffer,
-        ffi.arrayAddr(),
-        ffi.schemaAddr(),
-        true,
-      );
-      ffi.free();
+  try {
+    while (true) {
+      const { done, value: wBatch } = await reader.read();
+      if (done) break;
+      if (wBatch) {
+        let ffi = wBatch.intoFFI();
+        let arrowBat = ArrowFFI.parseRecordBatch(
+          mem.buffer,
+          ffi.arrayAddr(),
+          ffi.schemaAddr(),
+          true,
+        );
+        ffi.free();
 
-      yield arrowBat;
+        yield arrowBat;
+      }
     }
+  } finally {
+    reader.releaseLock();
   }
 }
 
