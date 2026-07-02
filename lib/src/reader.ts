@@ -219,10 +219,16 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
     if (!this.initialized) await this.init();
     const handle = await this.store.wavelengthSpectrumData();
     if (!handle) return null;
-    this._wavelengthSpectrumDataReader = await DataArraysReader.fromParquet(
+    const dataReader = await DataArraysReader.fromParquet(
       handle,
-      BufferContext.Spectrum,
+      BufferContext.WavelengthSpectrum,
     );
+    // Mirror spectrumData(): install spacing models so chunked / delta-encoded
+    // wavelength arrays decode (point-layout files don't need them, but PDA files
+    // written with the chunked layout do).
+    if (this.wavelengthMetadata)
+      dataReader.spacingModels = this.wavelengthMetadata.loadSpacingModelIndex();
+    this._wavelengthSpectrumDataReader = dataReader;
     return this._wavelengthSpectrumDataReader;
   }
 
