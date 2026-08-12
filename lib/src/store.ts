@@ -21,6 +21,12 @@ const SELECTED_IONS = "selected_ions";
 const PRODUCTS = "products";
 const PROPRIETARY = "proprietary";
 
+// Canonicalize an index data_kind/entity_type token so "_" and " " compare equal
+// (spec uses "data arrays"/"wavelength spectrum"; the converter emits the underscore forms).
+function normalizeKindKey(s: string): string {
+  return s.replace(/_/g, " ").toLowerCase();
+}
+
 export enum DataKindTag {
   DataArrays = DATA_ARRAYS,
   Metadata = METADATA,
@@ -56,10 +62,14 @@ export class DataKind {
     // Match on the enum's VALUE, not its key name. TypeScript string enums have no reverse
     // mapping, so `DataKindTag[key]` is always undefined for an index value like "metadata"
     // (the key is `Metadata`) — which made every entry fall back to `Other`.
-    const tag: DataKindTag = (Object.values(DataKindTag) as string[]).includes(key)
-      ? (key as DataKindTag)
-      : DataKindTag.Other;
-    return new DataKind(key, tag);
+    // Normalize "_" vs " ": the spec spells the multi-word kinds with spaces
+    // ("data arrays", "wavelength spectrum") but the reference converter emits underscores
+    // ("data_arrays", "wavelength_spectrum"). Without this every chunked corpus file loses
+    // its spectra_data facet and reads back zero points.
+    const tag = (Object.values(DataKindTag) as string[]).find(
+      (v) => normalizeKindKey(v) === normalizeKindKey(key),
+    ) as DataKindTag | undefined;
+    return new DataKind(key, tag ?? DataKindTag.Other);
   }
 }
 
@@ -91,11 +101,11 @@ export class EntityType {
   }
 
   static fromString(key: string) {
-    // Same fix as DataKind.fromString: match the enum VALUE, not the key name.
-    const tag: EntityTypeTag = (Object.values(EntityTypeTag) as string[]).includes(key)
-      ? (key as EntityTypeTag)
-      : EntityTypeTag.Other;
-    return new EntityType(key, tag)
+    // Same fix as DataKind.fromString: match the enum VALUE (normalizing "_" vs " ") not the key.
+    const tag = (Object.values(EntityTypeTag) as string[]).find(
+      (v) => normalizeKindKey(v) === normalizeKindKey(key),
+    ) as EntityTypeTag | undefined;
+    return new EntityType(key, tag ?? EntityTypeTag.Other)
   }
 }
 

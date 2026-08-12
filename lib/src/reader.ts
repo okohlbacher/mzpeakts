@@ -17,6 +17,22 @@ import { Span1D, Span1DBigInt } from "./utils";
 import { bigIntToNumber } from "apache-arrow/util/bigint";
 import { DataArrays } from './data';
 
+// A facet whose Parquet has zero row groups (an empty spectra_peaks/spectra_data — common on
+// centroid-only or SciEX MRM exports) means "no data for this facet", not an error. Callers
+// that attempt a facet read speculatively (e.g. when the metadata count column is unpopulated)
+// need it to resolve to null rather than throw "Empty Parquet file".
+async function fromParquetOrNull(
+  handle: Parameters<typeof DataArraysReader.fromParquet>[0],
+  context: BufferContext,
+): Promise<DataArraysReader | null> {
+  try {
+    return await DataArraysReader.fromParquet(handle, context);
+  } catch (e) {
+    if (e instanceof Error && e.message === "Empty Parquet file") return null;
+    throw e;
+  }
+}
+
 export interface XICPoint {
   index: bigint,
   time: number | null,
@@ -134,10 +150,8 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
     if (!this.initialized) await this.init();
     const handle = await this.store.spectrumData();
     if (!handle) return null;
-    const dataReader = await DataArraysReader.fromParquet(
-      handle,
-      BufferContext.Spectrum,
-    );
+    const dataReader = await fromParquetOrNull(handle, BufferContext.Spectrum);
+    if (!dataReader) return null;
     if (this.spectrumMetadata)
       dataReader.spacingModels = this.spectrumMetadata.loadSpacingModelIndex();
     this._spectrumDataReader = dataReader;
@@ -198,7 +212,8 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
     if (!this.initialized) await this.init();
     const handle = await this.store.spectrumPeaks();
     if (!handle) return null;
-    return await DataArraysReader.fromParquet(handle, BufferContext.Spectrum);
+    this._spectrumPeaksReader = await fromParquetOrNull(handle, BufferContext.Spectrum);
+    return this._spectrumPeaksReader;
   }
 
   async chromatogramData() {
@@ -237,8 +252,11 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
     const meta = this.spectrumMetadata?.get(index);
     if (meta) {
       const indexNum = bigIntToNumber(index);
+      // A count of 0 means "known empty, skip"; null/undefined means "unknown" — the
+      // converter left number_of_data_points/number_of_peaks unpopulated (seen on SciEX
+      // MRM exports), so attempt the facet read rather than silently returning 0 points.
       const dpCount = this.spectrumMetadata?.dataPointCount(indexNum)
-      if (dpCount) {
+      if (dpCount == null || dpCount > 0) {
         const handle = await this.spectrumData();
         const data = await handle?.get(index);
         if (data) {
@@ -246,7 +264,7 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
         }
       }
       const peakCount = this.spectrumMetadata?.peakCount(indexNum);
-      if (peakCount) {
+      if (peakCount == null || peakCount > 0) {
         const peakHandle = await this.spectrumPeaks();
         const peakData = await peakHandle?.get(index);
         if (peakData && peakData.numRows > 0) {

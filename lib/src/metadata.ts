@@ -29,8 +29,45 @@ import {
 const DATA_POINT_COUNT_ACC = "MS:1003060";
 const PEAK_COUNT_ACC = "MS:1003059";
 
+// arrow-js-ffi imports the C-interface Large* types with typeIds apache-arrow's visitor
+// dispatch cannot resolve (LargeList → 30, `Type[30]` undefined). Downgrade to the
+// equivalent small-offset variants — which is what the FFI already produces for the data.
+function compatType(t: Arrow.DataType): Arrow.DataType {
+  const a = t as any;
+  switch ((t as any)[Symbol.toStringTag]) {
+    case "LargeList":
+    case "List":
+      return new Arrow.List(compatField(a.children[0]));
+    case "LargeUtf8":
+      return new Arrow.Utf8();
+    case "LargeBinary":
+      return new Arrow.Binary();
+    case "Struct":
+      return new Arrow.Struct(a.children.map(compatField));
+    case "FixedSizeList":
+      return new Arrow.FixedSizeList(a.listSize, compatField(a.children[0]));
+    case "Map":
+    case "Map_":
+      return new Arrow.Map_(compatField(a.children[0]), a.keysSorted);
+    default:
+      return t;
+  }
+}
+
+function compatField(f: Arrow.Field): Arrow.Field {
+  return new Arrow.Field(f.name, compatType(f.type), f.nullable, f.metadata);
+}
+
+// An empty (0-row) facet still needs a struct Vector whose children are real Data instances,
+// otherwise getChild/getChildAt throws "Vector constructor expects an Array of Data
+// instances" the moment any spectrum with empty precursors/selected_ions is read. Build one
+// empty child Data per field (types coerced so the Large* shim's bad typeIds never surface).
 function emptyStructVecFrom(type: Arrow.Struct) {
-  return Arrow.makeVector(Arrow.makeData({ type }));
+  const fields = type.children.map(compatField);
+  const children = fields.map((f) => Arrow.makeData({ type: f.type, length: 0 }));
+  return Arrow.makeVector(
+    Arrow.makeData({ type: new Arrow.Struct(fields), length: 0, children }),
+  );
 }
 
 /**
