@@ -49,10 +49,14 @@ export class DataKind {
   }
 
   equals(other: string | DataKind | DataKindTag) {
-    if (other instanceof String) {
-      return this.name == other;
-    } else if (other instanceof DataKind) {
-      return this.name == other.name;
+    // Compare on the resolved TAG, not the raw name: fromString normalizes "_"<->" "
+    // into the tag, but the raw names still differ ("data_arrays" vs "data arrays",
+    // "wavelength_spectrum" vs "wavelength spectrum"), so a name compare wrongly rejects
+    // the wavelength/data facets and they never load.
+    if (other instanceof DataKind) {
+      return this.tag == other.tag;
+    } else if (typeof other === "string") {
+      return normalizeKindKey(this.name) == normalizeKindKey(String(other));
     } else {
       return this.tag == other;
     }
@@ -91,10 +95,12 @@ export class EntityType {
   }
 
   equals(other: string | EntityType | EntityTypeTag) {
-    if (other instanceof String) {
-      return this.name == other;
-    } else if (other instanceof EntityType) {
-      return this.name == other.name;
+    // Compare on the resolved TAG (see DataKind.equals): "wavelength_spectrum" and
+    // "wavelength spectrum" must compare equal, which a raw-name compare would fail.
+    if (other instanceof EntityType) {
+      return this.tag == other.tag;
+    } else if (typeof other === "string") {
+      return normalizeKindKey(this.name) == normalizeKindKey(String(other));
     } else {
       return this.tag == other;
     }

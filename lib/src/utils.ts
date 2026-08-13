@@ -44,7 +44,11 @@ export function binarySearch<T extends Arrow.DataType>(
   let lo = 0;
   let hi = array.length - 1;
   while (lo <= hi) {
-    let mid = lo + Math.floor(hi - lo) / 2;
+    // NB: floor the whole half-width — `Math.floor(hi - lo) / 2` floors an already-integer
+    // difference and then divides, yielding a FRACTIONAL mid. With `lo = mid` / `hi = mid`
+    // (no ±1) that never converges → infinite loop on small arrays. Use an integer mid and
+    // move the bound past it.
+    let mid = lo + Math.floor((hi - lo) / 2);
     let val = array.get(mid);
     if (val == null) {
       const top = linearSearch(array, value, mid, hi);
@@ -56,9 +60,9 @@ export function binarySearch<T extends Arrow.DataType>(
       }
     }
     if (val < value) {
-      lo = mid;
+      lo = mid + 1;
     } else if (val > value) {
-      hi = mid;
+      hi = mid - 1;
     } else {
       return mid;
     }
