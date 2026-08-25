@@ -899,9 +899,15 @@ export class ChunkLayoutReader extends BaseLayoutReader {
     const chunkEncodingVec = rootStruct.getChild(
       this.chunkEncodingFieldName,
     ) as Arrow.Vector<Arrow.Utf8>;
+    // The chunk_values column may be PHYSICALLY ABSENT: mzpeak-convert ≥0.7.10 omits it
+    // when every chunk is Numpress-encoded (the m/z lives only in the numpress byte
+    // column). The array_index still declares it, so getChild returns null — reading it
+    // unconditionally crashed on every spectrum of such files ("null is not an object
+    // (evaluating 'o.get')"). Numpress branches never need it; the plain/delta branches
+    // below already fail loud when chunkValues is null.
     const chunkValuesVec = rootStruct.getChild(
       this.chunkValuesFieldName,
-    ) as Arrow.Vector<Arrow.List<Arrow.DataType>>;
+    ) as Arrow.Vector<Arrow.List<Arrow.DataType>> | null;
 
     const indexColName = bufferContextIndexName(this.mainAxisEntry.context);
     const mainAxisName = this.chunkValuesFieldName;
@@ -953,9 +959,9 @@ export class ChunkLayoutReader extends BaseLayoutReader {
       visitedCols.clear()
       const startValue = Number(chunkStartVec.get(rowIdx) ?? 0);
       const encoding = chunkEncodingVec.get(rowIdx) ?? "";
-      const chunkValues = chunkValuesVec.get(
-        rowIdx,
-      ) as Arrow.Vector<Arrow.Float> | null;
+      const chunkValues = (chunkValuesVec
+        ? chunkValuesVec.get(rowIdx)
+        : null) as Arrow.Vector<Arrow.Float> | null;
 
       // If we are extracting for a target range, don't bother processing this chunk
       // if it doesn't touch the range we care about.
