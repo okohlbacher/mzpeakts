@@ -479,6 +479,26 @@ async function readZipHeaderSize<T>(blob: RemoteBlob<T>) {
 }
 
 /**
+ * Per-source read serialization. parquet-wasm's async reader issues several page reads
+ * concurrently; when their completions arrive OUT OF ISSUE ORDER (browsers routinely
+ * reorder range fetches; Node's local fetch happens to complete in order) the reader's
+ * internal buffer assembly is corrupted and the wasm panics with
+ * `range start must not be greater than end` (bytes crate) while parsing a page.
+ * Chaining every read on the shared underlying {@linkcode zip.Reader} forces completion
+ * order == issue order, which sidesteps the bug. Measured cost is negligible: the hot
+ * paths issue large mostly-sequential reads, and parallel range reads showed no
+ * wall-clock win on this stack anyway.
+ */
+const sourceReadChains = new WeakMap<object, Promise<unknown>>();
+
+function chainRead<R>(source: object, read: () => Promise<R>): Promise<R> {
+  const prev = sourceReadChains.get(source) ?? Promise.resolve();
+  const run = prev.then(read);
+  sourceReadChains.set(source, run.catch(() => undefined));
+  return run;
+}
+
+/**
  * An abstraction that mimicks the built-in {@linkcode Blob} interface but serves data
  * using a {@linkcode zip.Reader} instance. This may refer to a byte range of a larger
  * data store as in a `ZIP` archive.
@@ -562,9 +582,10 @@ export class RemoteBlob<T> {
   }
 
   private async _read(): Promise<Uint8Array> {
-    const buf = await this.source.readUint8Array(
-      this.start,
-      this.end - this.start,
+    // Serialized per shared source — see chainRead above (out-of-order completion of
+    // concurrent parquet-wasm page reads panics the wasm reader).
+    const buf = await chainRead(this.source as object, () =>
+      this.source.readUint8Array(this.start, this.end - this.start),
     );
     return buf;
   }
