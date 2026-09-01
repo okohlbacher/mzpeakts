@@ -574,6 +574,18 @@ export class SpectrumBuilder extends RecordVisitor<Spectrum> {
               if (val && member) member.isProfile = val == "MS:1000128"; // profile spectrum
             }
             break;
+          case "MS:1000016": // scan start time — ALSO the structural Spectrum.time field.
+            // A MAPPED time column used to divert to visitAsParameter and `continue` past
+            // the structural `case "time"` handler below, leaving every Spectrum.time at
+            // the constructor's 0 (flat files map `time`, so ALL their record times were
+            // zero — PDA/wavelength RT axes collapsed to 0 s). Populate the field; the
+            // value stays in file units (minutes) exactly like the structural path.
+            for (let j = 0; j < colArray.length; j++) {
+              const val = colArray.at(j);
+              const member = this.members[j];
+              if (val != null && member) member.time = val;
+            }
+            break;
           case "MS:1000559":
           case "MS:1000504":
           case "MS:1000505":

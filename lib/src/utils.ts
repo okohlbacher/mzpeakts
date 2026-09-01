@@ -34,7 +34,7 @@ export function linearSearchNearest<T extends Arrow.DataType>(
     if (isFinite(lastErr) && e > lastErr) break;
     lastErr = e;
   }
-  return isFinite(bestError) ? [bestIdx, bestError] : null;
+  return isFinite(bestError) ? ([bestIdx, bestError] as [number, number]) : null;
 }
 
 export function binarySearch<T extends Arrow.DataType>(
@@ -100,74 +100,86 @@ export function binarySearchAll<T extends Arrow.DataType>(
       break;
     }
   }
-  if (hi < n) {
-    if (array.get(hi) == value) {
-      ++hi;
-    }
-  }
-  return [lo, hi];
+  // Callers slice [lo, hi) EXCLUSIVE. After the loop `hi` is the last equal index, so the
+  // exclusive end is always hi+1 — the old `if (hi < n) ++hi` skipped the increment when a
+  // group ended at the vector end, silently dropping the LAST spectrum's scan/precursor/
+  // selected-ion rows in every file.
+  return [lo, hi + 1];
 }
 
 export function binarySearchNearest<T extends Arrow.DataType>(
   array: Arrow.Vector<T>,
   value: T["TValue"],
-) {
+): [number, number] | null {
+  // Rewritten: the old version computed a FRACTIONAL mid (`Math.floor(hi - lo) / 2`),
+  // never advanced its bounds (`lo = mid` / `hi = mid`), and could return a bare falsy 0
+  // that callers testing `if (result)` treated as "not found". Every m/z-window slice
+  // (XIC/DIA extraction) went through it and came back empty for narrow windows.
+  const n = array.length;
+  if (n === 0) return null;
   let lo = 0;
-  let hi = array.length - 1;
-  while (lo <= hi) {
-    let mid = lo + Math.floor(hi - lo) / 2;
-    let val = array.get(mid);
+  let hi = n; // exclusive
+  while (lo < hi) {
+    const mid = lo + ((hi - lo) >> 1);
+    const val = array.get(mid);
     if (val == null) {
-      const top = linearSearchNearest(array, value, mid, hi);
-      if (top !== null) return top;
-      const bottom = linearSearchNearest(array, value, lo, hi);
-      if (bottom !== null) return bottom;
-      else {
-        return 0;
-      }
+      // nulls in a sorted coordinate column are unexpected — degrade to a linear pass
+      // over the WHOLE vector (end-inclusive, unlike the old off-by-one fallback).
+      return linearSearchNearest(array, value, 0, n);
     }
-    if (val < value) {
-      lo = mid;
-    } else if (val > value) {
-      hi = mid;
-    } else {
-      const local = linearSearchNearest(
-        array,
-        value,
-        Math.max(mid - 5, 0),
-        Math.min(array.length - 1, mid + 5),
-      );
-      return local;
-    }
+    if (val < value) lo = mid + 1;
+    else hi = mid;
   }
-  return 0;
+  // lo = lower bound (first index with v >= value). Nearest is lo or lo-1.
+  const cand: number[] = [];
+  if (lo < n) cand.push(lo);
+  if (lo > 0) cand.push(lo - 1);
+  let bestIdx: number | null = null;
+  let bestErr = Infinity;
+  for (const i of cand) {
+    const v = array.get(i);
+    if (v == null) continue;
+    const e = Math.abs(Number(v) - Number(value));
+    if (e < bestErr) { bestErr = e; bestIdx = i; }
+  }
+  return bestIdx == null ? null : [bestIdx, bestErr];
 }
 
 export function betweenSorted<T extends Arrow.DataType>(
   array: Arrow.Vector<T>,
   start: T["TValue"],
   end: T["TValue"],
-) {
-  const low = binarySearchNearest(array, start);
-  const hi = binarySearchNearest(array, end);
-  let startIdx = null;
-  let endIdx = null;
-  if (low) {
-    startIdx = low[0];
-  }
-  if (hi) {
-    endIdx = hi[0];
-  }
-  if (startIdx == null) {
-    if (endIdx != null) {
-      return [0, endIdx];
+): [number, number] | null {
+  // Rewritten: "nearest" is the wrong primitive for a window slice — the nearest index to
+  // `start` can sit BELOW the window and the nearest to `end` was used as an EXCLUSIVE
+  // slice end, silently dropping the last in-window point (and often the whole window:
+  // a peak at 150.0 with window [149.9, 150.1] sliced to [0, 0]). Compute the true
+  // [first v >= start, last v <= end] bounds and return an exclusive end.
+  const n = array.length;
+  if (n === 0) return null;
+  const lowerBound = (v: number): number => {
+    let lo = 0, hi = n;
+    while (lo < hi) {
+      const mid = lo + ((hi - lo) >> 1);
+      const x = array.get(mid);
+      if (x == null) {
+        // null in a sorted coordinate column — degrade to linear.
+        let i = 0;
+        while (i < n) { const y = array.get(i); if (y != null && Number(y) >= v) break; i++; }
+        return i;
+      }
+      if (Number(x) < v) lo = mid + 1; else hi = mid;
     }
-    return null;
-  }
-  if (endIdx != null) {
-    return [startIdx, endIdx];
-  }
-  return [startIdx, array.length];
+    return lo;
+  };
+  const first = lowerBound(Number(start)); // first index with value >= start
+  // Exclusive end: first index with value > end. lowerBound(end) lands on the first
+  // value >= end; step past any values EQUAL to end so the closed [start, end] window
+  // includes an exact boundary match.
+  let hiEx = lowerBound(Number(end));
+  while (hiEx < n) { const y = array.get(hiEx); if (y != null && Number(y) <= Number(end)) hiEx++; else break; }
+  if (first >= hiEx) return null; // empty window
+  return [first, hiEx];
 }
 
 export interface Span1D {
