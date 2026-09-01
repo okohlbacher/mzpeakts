@@ -120,21 +120,35 @@ export class MetadataColumn {
   path: string[];
   accession: string | null = null;
   unit: string | null = null;
+  term_marker: boolean | null = null;
 
   constructor(
     name: string,
     path: string[] | string,
     accession: string | null = null,
     unit: string | null = null,
+    term_marker: boolean | null = null,
   ) {
     this.name = name;
-    this.path = (path instanceof String || typeof path === "string") ? path.split(".") : (path as string[]);
+    this.path =
+      path instanceof String || typeof path === "string"
+        ? path.split(".")
+        : (path as string[]);
     this.accession = accession;
     this.unit = unit;
+    this.term_marker = term_marker
   }
 
   param(value: any | null) {
     return new Param(this.name, value, this.accession, this.unit);
+  }
+
+  get termMarker() {
+    return this.term_marker ?? false
+  }
+
+  set termMarker(value: boolean | null) {
+    this.term_marker = value ?? false
   }
 
   get leaf() {
@@ -147,6 +161,7 @@ export class MetadataColumn {
       value.path,
       value.accession || null,
       value.unit || null,
+      value.term_marker || null,
     );
   }
 }

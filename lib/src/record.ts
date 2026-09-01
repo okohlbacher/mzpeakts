@@ -98,7 +98,14 @@ abstract class RecordVisitor<T extends ParamDescribed> {
     for (let j = 0; j < colArray.length; j++) {
       const val = colArray.at(j);
       const member = this.members[j];
-      if (val && member) member.parameters.push(metaCol.param(val));
+      if (val && member) {
+        if (metaCol.termMarker) {
+          member.parameters.push(metaCol.param(null))
+        }
+        else {
+          member.parameters.push(metaCol.param(val))
+        }
+      };
     }
   }
 }
