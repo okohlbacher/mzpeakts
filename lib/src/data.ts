@@ -71,6 +71,9 @@ export const NULL_ZERO_CURIE = "MS:1003901";
 
 const NO_COMPRESSION_CURIE = "MS:1000576";
 const DELTA_CURIE = "MS:1003089";
+/** "coordinate grid encoding": the main axis is integer indices in a `chunk_transform` struct
+ *  column `{grid_type, parameters, indices}` that carries its own per-row model. */
+export const GRID_CURIE = "MS:1003826";
 
 // Human-readable CV array names used to pick the m/z + intensity columns in the fast
 // POINT-layout bulk path (matches packTableIntoDataArrays' field-name keys).
@@ -157,6 +160,76 @@ function indexVectorOf(
   rootStruct: Arrow.Vector<Arrow.Struct>,
 ): Arrow.Vector<Arrow.Uint64> {
   return rootStruct.getChildAt(0) as Arrow.Vector<Arrow.Uint64>;
+}
+
+// ---- coordinate grid models (per chunk row: grid_type + parameters) ----
+// Model CURIEs as the reference implementation (HUPO-PSI/mzPeak src/grid.rs,
+// python/mzpeak/grid.py) spells them. MS:9999001/2 are PLACEHOLDERS until PSI assigns terms —
+// edit them here only.
+export const GRID_LINEAR = "MS:1003824";
+export const GRID_SQRT_LINEAR = "MS:1003825";
+export const GRID_TIMS_MOBILITY = "MS:9999001";
+export const GRID_TIMSTOF_MZ = "MS:9999002";
+
+/** index → value for one grid model. Unknown model → throw (never fall back to a default). */
+export function gridModel(gridType: string, p: ArrayLike<number>): (i: number) => number {
+  switch (gridType) {
+    case GRID_LINEAR: {
+      const [a, b, scale = 1] = [p[0], p[1], p[2]];
+      return (i) => (a + i * b) / scale;
+    }
+    case GRID_SQRT_LINEAR: {
+      const [a, b, scale = 1] = [p[0], p[1], p[2]];
+      return (i) => ((a + i * b) * (a + i * b)) / scale;
+    }
+    case GRID_TIMS_MOBILITY: {
+      // [C6, C7, offset, slope] → 1/K0 = 1 / (C6 + C7 / (offset + slope·scan))
+      const [c6, c7, off, slope] = [p[0], p[1], p[2], p[3]];
+      return (i) => 1 / (c6 + c7 / (off + slope * i));
+    }
+    case GRID_TIMSTOF_MZ: {
+      // [C0, β, C2, C3, C4, timebase, delay]; temperature already folded in by the writer.
+      // No Math.fma in JS: tof differs from the fused Rust value by ≤4 ulp when timebase is
+      // not a binary fraction (~1e-10 ppm) — compare with a tolerance, never bit-exact.
+      const [c0, beta, c2, c3, c4, timebase, delay] =
+        [p[0], p[1], p[2], p[3], p[4], p[5], p[6]];
+      return (i) => {
+        const tof = i * timebase + delay;
+        let s = (tof - c0) / beta;
+        if (c3 !== 0) {
+          for (let k = 0; k < 8; k++) {
+            const f = c0 + beta * s + c2 * s * s + c3 * s * s * s - tof;
+            const df = beta + 2 * c2 * s + 3 * c3 * s * s;
+            if (df === 0) break;
+            s -= f / df;
+          }
+        } else if (c2 !== 0) {
+          const d = beta * beta - 4 * c2 * (c0 - tof);
+          if (d >= 0) s = (c0 - tof) / (-0.5 * (beta + Math.sqrt(d)));
+        }
+        return s * s - c4;
+      };
+    }
+    default:
+      throw new Error(`Unknown coordinate grid model: ${gridType}`);
+  }
+}
+
+/** Decode one `{grid_type, parameters, indices}` struct cell. The main axis is delta-coded
+ *  INCLUDING its first point (plain running sum, not seeded from chunk_start); secondary
+ *  axes (ion mobility scan numbers) are absolute. */
+export function decodeGridCell(cell: any, deltaEncoded: boolean): Arrow.Vector<Arrow.Float64> {
+  if (cell == null) throw new Error("Grid-encoded chunk has a null grid struct");
+  const model = gridModel(String(cell.grid_type), (cell.parameters as Arrow.Vector).toArray());
+  const idx = (cell.indices as Arrow.Vector).toArray() as ArrayLike<number>;
+  const out = new Float64Array(idx.length);
+  let acc = 0;
+  for (let i = 0; i < idx.length; i++) {
+    const v = Number(idx[i]);
+    acc = deltaEncoded ? acc + v : v;
+    out[i] = model(acc);
+  }
+  return Arrow.makeVector(out);
 }
 
 function decodeNoCompression(
@@ -921,6 +994,11 @@ export class ChunkLayoutReader extends BaseLayoutReader {
     for (const { name } of this.secondaryFields) resultSecondary[name] = [];
 
     const queryRange = this.queryCoordinateRange;
+    const mainAxisCURIE = this.mainAxisEntry.arrayTypeCURIE;
+    const mainGrid = this.secondaryFields.find(
+      ({ entry }) => entry.transform === GRID_CURIE && entry.arrayTypeCURIE === mainAxisCURIE,
+    );
+    const mainGridVec = mainGrid ? rootStruct.getChild(mainGrid.name) : null;
 
     // Numpress main-axis values live in a separate byte-array column (not chunkValues).
     // The column is identical for every selected row, so look it up by transform CURIE
@@ -967,7 +1045,13 @@ export class ChunkLayoutReader extends BaseLayoutReader {
       // if it doesn't touch the range we care about.
       if (queryRange != null) {
         const endValue = Number(chunkEndVec.get(rowIdx) ?? 0);
-        const rowSpan = { start: startValue, end: endValue };
+        // Grid bounds are the writer's fused-multiply-add m/z; our unfused decode can land a
+        // bound point a few ulp outside — widen the ROW predicate by a relative 1e-15.
+        const slack = encoding === GRID_CURIE ? 1e-15 : 0;
+        const rowSpan = {
+          start: startValue - Math.abs(startValue) * slack,
+          end: endValue + Math.abs(endValue) * slack,
+        };
         if (!intervalOverlaps(rowSpan, queryRange)) {
           continue;
         }
@@ -1023,6 +1107,13 @@ export class ChunkLayoutReader extends BaseLayoutReader {
           decoded = acc.buildArrow();
           break;
         }
+        case GRID_CURIE:
+          // Values live in the grid struct; mz_chunk_values is NULL here — never decode it
+          // (a NULL-values fallback would invent a phantom point at chunk_start).
+          if (mainGridVec == null)
+            throw new Error(`Grid-encoded chunk at row ${rowIdx}, but no grid column for the main axis`);
+          decoded = decodeGridCell(mainGridVec.get(rowIdx), true);
+          break;
         default:
           throw new Error(`Unknown chunk encoding: ${encoding}`);
       }
@@ -1032,13 +1123,22 @@ export class ChunkLayoutReader extends BaseLayoutReader {
         resultIndex.append(entryIndex);
 
       for (const { name, entry } of this.secondaryFields) {
-        if (visitedCols.has(entry.schemaIndex)) continue
-        visitedCols.add(entry.schemaIndex);
+        // Struct columns (the grid's {grid_type, parameters, indices}) match no leaf path, so
+        // their schemaIndex is null — key those by field name, or every one after the first
+        // would be skipped as "visited".
+        const visitKey = entry.schemaIndex ?? name;
+        if (visitedCols.has(visitKey)) continue
+        visitedCols.add(visitKey);
         const secVec = rootStruct.getChild(name) as Arrow.Vector<
             Arrow.List<Arrow.DataType>
           >;
         let secValues = secVec.get(rowIdx);
         if (secValues == null) continue;
+        if (entry.transform === GRID_CURIE) {
+          if (entry.arrayTypeCURIE === mainAxisCURIE) continue;
+          resultSecondary[name].push(decodeGridCell(secValues, false));
+          continue;
+        }
         if (entry.transform == NULL_ZERO_CURIE) {
           nullToZero(secValues);
         }
