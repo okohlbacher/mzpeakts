@@ -66,3 +66,5 @@ export { MzPeakReader } from "./reader";
 export type { XIC, XICPoint } from "./reader";
 export * as data from "./data";
 export * as utils from "./utils"
+
+export * as ontology from "./ontology"

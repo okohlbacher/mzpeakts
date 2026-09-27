@@ -19,6 +19,7 @@
     "@zip.js/zip.js": "^2.8.23",
     "apache-arrow": "^21.1.0",
     "arrow-js-ffi": "^0.4.3",
+    "js-sha512": "^0.9.0",
     "parquet-wasm": "file:vendor/parquet-wasm/pkg/parquet-wasm-0.7.1.tgz"
   },
   "files": [

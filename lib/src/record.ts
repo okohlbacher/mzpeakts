@@ -94,6 +94,14 @@ abstract class RecordVisitor<T extends ParamDescribed> {
     }
   }
 
+  visitParametersInto<U extends ParamDescribed>(colArray: Arrow.Vector, getInto: (x: T) => U | null)  {
+    for (let j = 0; j < colArray.length; j++) {
+      const val = colArray.at(j);
+      const member = this.members[j];
+      if (val && member) getInto(member)?.parameters.push(...Param.fromArrow(val));
+    }
+  }
+
   visitAsParameter(colArray: Arrow.Vector, metaCol: MetadataColumn) {
     for (let j = 0; j < colArray.length; j++) {
       const val = colArray.at(j);
@@ -106,6 +114,22 @@ abstract class RecordVisitor<T extends ParamDescribed> {
           member.parameters.push(metaCol.param(val))
         }
       };
+    }
+  }
+
+  visitAsParameterInto<U extends ParamDescribed>(colArray: Arrow.Vector, metaCol: MetadataColumn, getInto: (x: T) => U | null) {
+    console.log("visit into", metaCol)
+    for (let j = 0; j < colArray.length; j++) {
+      const val = colArray.at(j);
+      const member = this.members[j];
+      if (val && member) {
+        const target = getInto(member);
+        if (metaCol.termMarker) {
+          target?.parameters.push(metaCol.param(null));
+        } else {
+          target?.parameters.push(metaCol.param(val));
+        }
+      }
     }
   }
 }
@@ -166,23 +190,39 @@ export class PrecursorBuilder extends RecordVisitor<Precursor> {
       if (!colArray) continue;
       if (metaCol) {
         switch (metaCol.accession) {
+          case "MS:1000044":
+            for (let j = 0; j < colArray.length; j++) {
+              const val = colArray.at(j);
+              const member = this.members[j];
+              if (val != null && member) member.activation.dissociationMethod = val;
+            }
+            break
+          case "MS:1000045":
+            for (let j = 0; j < colArray.length; j++) {
+              const val = colArray.at(j);
+              const member = this.members[j];
+              if (val != null && member)
+                member.activation.energy = val;
+            }
+            break;
           default:
-            this.visitAsParameter(colArray, metaCol);
+            this.visitAsParameterInto(colArray, metaCol, (prec) => prec.activation);
         }
         continue;
+      } else {
+        switch (field.name) {
+          case "parameters":
+            this.visitParametersInto(colArray, (prec) => prec.activation);
+            break;
+          default:
+            this.visitAsParameterInto(
+              colArray,
+              new MetadataColumn(field.name, []),
+              (prec) => prec.activation,
+            );
+        }
       }
 
-      switch (field.name) {
-        case "parameters":
-          for (let j = 0; j < colArray.length; j++) {
-            const val = colArray.at(j);
-            const member = this.members[j];
-            if (val && member)
-              member.activation.parameters.push(...Param.fromArrow(val));
-          }
-          break;
-        default:
-      }
     }
   }
 
@@ -228,7 +268,17 @@ export class PrecursorBuilder extends RecordVisitor<Precursor> {
         }
         continue;
       }
-      this.visitAsParameter(colArray, new MetadataColumn(field.name, []));
+      switch (field.name) {
+        case "parameters":
+          this.visitParametersInto(colArray, (prec) => prec.isolationWindow);
+          break;
+        default:
+          this.visitAsParameterInto(
+            colArray,
+            new MetadataColumn(field.name, []),
+            (prec) => prec.isolationWindow,
+          );
+      }
     }
   }
 
@@ -791,12 +841,13 @@ export class Scan extends HasIonMobility {
   }
 }
 
-export class IsolationWindow {
+export class IsolationWindow extends ParamDescribed {
   target: number;
   lowerOffset: number;
   upperOffset: number;
 
-  constructor(target: number, lower: number, upper: number) {
+  constructor(target: number, lower: number, upper: number, parameters: Param[] | null = null) {
+    super(parameters ?? [])
     this.target = target;
     this.lowerOffset = lower;
     this.upperOffset = upper;
@@ -812,8 +863,12 @@ export class IsolationWindow {
 }
 
 export class Activation extends ParamDescribed {
-  constructor(parameters: Param[]) {
+  energy: number | null
+  dissociationMethod: string | null
+  constructor(parameters: Param[], energy: number | null = null, dissociationMethod: string | null = null) {
     super(parameters);
+    this.energy = energy
+    this.dissociationMethod = dissociationMethod
   }
 }
 

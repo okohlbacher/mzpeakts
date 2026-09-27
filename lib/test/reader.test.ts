@@ -105,6 +105,10 @@ test("chunked layout reader", async () => {
       );
     }
   }
+
+  const {status, failed} = await reader.store.checkArchiveIntegrity();
+  expect.assert(status == true, "Expected the archive be valid")
+  expect.assert(failed.length == 0, "Expected the archive be valid");
 });
 
 
@@ -142,7 +146,9 @@ test("point layout reader", async () => {
       );
     }
   }
-  reader.fileMetadata
+  const { status, failed } = await reader.store.checkArchiveIntegrity();
+  expect.assert(status == true, "Expected the archive be valid");
+  expect.assert(failed.length == 0, "Expected the archive be valid");
 });
 
 

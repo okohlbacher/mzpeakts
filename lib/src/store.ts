@@ -2,6 +2,7 @@
 import * as zip from "@zip.js/zip.js";
 import { ParquetFile, setPanicHook } from "parquet-wasm";
 import { Param, ParquetTableNamespace } from "./metadata";
+import { sha512 } from "js-sha512";
 
 setPanicHook();
 
@@ -172,6 +173,7 @@ export class FileIndexEntry {
   entity_type: EntityType;
   column_mapping: MetadataColumn[];
   parameters: Param[];
+  checksum: string | null = null
 
   constructor(
     name: string,
@@ -179,6 +181,7 @@ export class FileIndexEntry {
     entity_type: string,
     column_mapping: any[],
     parameters: any[],
+    checksum: string | null = null,
   ) {
     this.name = name;
     this.data_kind = DataKind.fromString(data_kind);
@@ -187,6 +190,7 @@ export class FileIndexEntry {
       ? column_mapping.map(MetadataColumn.fromRaw)
       : [];
     this.parameters = parameters ? parameters.map(Param.fromJSON) : [];
+    this.checksum = checksum ?? null;
   }
 
   get columnMapping() {
@@ -222,6 +226,7 @@ export class FileIndex {
           e.entity_type,
           e.column_mapping,
           e.parameters,
+          e.checksum ?? null
         ),
     );
     return new FileIndex(files, indexObj.metadata);
@@ -328,6 +333,48 @@ export class ZipStorage<T> {
     );
     if (entry === undefined) return undefined;
     return this.open(entry.name);
+  }
+
+  /**
+   * Open a {@linkcode RemoteBlob} from a {@linkcode FileIndexEntry}.
+   *
+   * This is a thin wrapper around {@linkcode openFromIndex}.
+   *
+   * @param entry The {@linkcode FileIndexEntry} to open
+   * @returns {RemoteBlob | undefined} The {@linkcode RemoteBlob} if it exists, `undefined` otherwise.
+   *
+   * @see {@linkcode openFromIndex}
+   */
+  async openFromEntry(entry: FileIndexEntry) {
+    return await this.openFromIndex(entry.entityType, entry.dataKind);
+  }
+
+  async checkFileIntegrity(entry: FileIndexEntry) {
+    if (entry.checksum == null) return null;
+    const blob = await this.openFromEntry(entry);
+    const chk = await blob?.checksum();
+    return chk === undefined ? null : chk == entry.checksum;
+  }
+
+  async checkArchiveIntegrity() {
+    let valid: boolean = true;
+    const failed = []
+    for(let entry of this.fileIndex.files) {
+      const state = await this.checkFileIntegrity(entry)
+      switch (state) {
+        case true:
+          continue
+        case false:
+        case null:
+        case undefined:
+          valid = false
+          failed.push({
+            entry,
+            checksum: await (await this.openFromEntry(entry))?.checksum(),
+        });
+      }
+    }
+    return {status: valid, failed}
   }
 
   async spectrumMetadata(): Promise<ParquetFile | undefined> {
@@ -632,5 +679,26 @@ export class RemoteBlob<T> {
     const buf = await this._read();
     const decoder = new TextDecoder("utf-8");
     return decoder.decode(buf);
+  }
+
+  /**
+   * Compute the SHA512 checksum of the file.
+   *
+   * @param block_size The number of bytes to read at a time. Defaults to 1MB, 2^20
+   * @returns {string} The hex digest of the the file hash
+   */
+  async checksum(block_size: number | null = null): Promise<string> {
+    const BLOCK_SIZE = block_size == null ? 1048576 : block_size;
+
+    const chk = sha512.create();
+    const size = this.size;
+    let acc = 0
+    for(let i = 0; i < size; i += BLOCK_SIZE) {
+      const end = Math.min(i + BLOCK_SIZE, size);
+      const buf = await this.slice(i, end).bytes();
+      acc += buf.length;
+      chk.update(buf);
+    }
+    return chk.hex()
   }
 }

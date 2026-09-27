@@ -98,6 +98,10 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
     return this._fileMetadata;
   }
 
+  async checkArchiveIntegrity() {
+    return await this.store.checkArchiveIntegrity()
+  }
+
   static async fromStore<T>(store: ZipStorage<T>) {
     const self = new this(store);
     await self.init();
