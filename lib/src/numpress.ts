@@ -149,7 +149,7 @@ export class IntDecoder {
       n = head;
     } else {
       n = head - 8;
-      const mask = 0xF0000000 | 0;
+      const mask = 0xF0000000;
       for (let i = 0; i < n; i++) {
         const m = (mask >> (4 * i)) | 0;
         res = (res | m) | 0;
@@ -220,11 +220,7 @@ export function encodeLinear(
     ints[0] = ints[1];
     ints[1] = ints[2];
     ints[2] = Math.trunc(data[i] * fixedPoint + 0.5);
-    // Accumulate the extrapolation in full-precision JS arithmetic to match the
-    // 64-bit reference encoder (see the matching note in decodeLinear). `diff`
-    // is the small second difference and stays narrowed to a 32-bit int for
-    // encodeInt.
-    const extrapol = ints[1] + (ints[1] - ints[0]);
+    const extrapol = (ints[1] + (ints[1] - ints[0])) | 0;
     const diff = (ints[2] - extrapol) | 0;
     halfByteCount += encodeInt(diff, halfBytes, halfByteCount);
 
@@ -283,16 +279,8 @@ export function decodeLinear(data: Uint8Array, dataSize: number, result: Appende
     ints[1] = ints[2];
     ints[2] = dec.next();
 
-    // The reference C decoder accumulates these reconstructed integers in 64-bit
-    // (`long long`). The reconstructed value is `mz * fixedPoint`; with
-    // ProteoWizard's auto fixed point (~2^31 / lowest m/z in the chunk) the
-    // high-m/z points exceed 2^31, so a `| 0` truncation here wraps them to large
-    // NEGATIVE integers — yielding negative m/z. JS numbers are exact integers up
-    // to 2^53, well above any mz*fixedPoint (~1e11), so accumulate in plain
-    // (full-precision) JS arithmetic to match the 64-bit reference. (The per-step
-    // diff from dec.next() is a small second difference that still fits in 32 bits.)
-    const extrapol = ints[1] + (ints[1] - ints[0]);
-    const y = extrapol + ints[2];
+    const extrapol = (ints[1] + (ints[1] - ints[0])) //| 0;
+    const y = (extrapol + ints[2]) //| 0;
     result.append(y / fixedPoint)
     ri++
     ints[2] = y;

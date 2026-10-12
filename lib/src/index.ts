@@ -56,9 +56,6 @@ export {
   PeekableDataStreamIterator,
   ChunkLayoutReader,
   PointLayoutReader,
-  GRID_CURIE,
-  gridModel,
-  decodeGridCell,
 } from "./data";
 export type { DataArrays } from "./data";
 export { ArrayIndex, ArrayIndexEntry, BufferContext, BufferFormat, BufferPriority } from "./array_index";
@@ -68,3 +65,4 @@ export * as data from "./data";
 export * as utils from "./utils"
 
 export * as ontology from "./ontology"
+export * as grid from "./grid"

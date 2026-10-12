@@ -159,6 +159,7 @@ export class ArrayIndexEntry {
     return tokens[tokens.length - 1];
   }
 
+
   arrowBuilder() {
     switch (this.dataTypeCURIE) {
       case "MS:1000523":
@@ -226,6 +227,21 @@ export class ArrayIndex {
     this.byFieldName.clear();
     for (let e of this.entries) {
       this.byFieldName.set(e.fieldName, e);
+    }
+  }
+
+  annotateFromSchema(schema: Arrow.Schema) {
+    const rootNode = schema.fields[0];
+    let buffer = [rootNode.name];
+    const columnBuffers = (rootNode.type as Arrow.Struct).children;
+    for (let i = 0; i < columnBuffers.length; i++) {
+      const field = columnBuffers[i];
+      buffer.push(field.name);
+      const pathOf = buffer.join(".");
+      for (const entry of this.entries) {
+        if (entry.path === pathOf) entry.schemaIndex = i;
+      }
+      buffer.pop();
     }
   }
 

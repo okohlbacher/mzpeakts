@@ -846,9 +846,13 @@ export class SpectrumMetadata extends MetadataReaderBase {
   loadSpacingModelIndex(): Map<bigint, SpacingInterpolationModel> | null {
     if (this.spectra === null) return null;
     const indexArr = this.spectra.getChildAt(0) as Arrow.Vector<Arrow.Uint64>;
-    const spacingModels = this.spectra.getChild(
+    let spacingModels = this.spectra.getChild(
       "mz_delta_model",
     ) as Arrow.Vector<Arrow.List<Arrow.Float64>> | null;
+    if (spacingModels == null)
+      spacingModels = this.spectra.getChild("coordinate_spacing_model") as Arrow.Vector<
+        Arrow.List<Arrow.Float64>
+      > | null;
     if (spacingModels == null) return null;
     const modelIndex = new Map();
     for (let i = 0; i < indexArr.length; i++) {
