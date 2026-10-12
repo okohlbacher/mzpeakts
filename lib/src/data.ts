@@ -1024,7 +1024,6 @@ export class ChunkLayoutReader extends BaseLayoutReader {
     for (const { name } of this.secondaryFields) resultSecondary[name] = [];
 
     const queryRange = this.queryCoordinateRange;
-    const mainAxisCURIE = this.mainAxisEntry.arrayTypeCURIE;
 
     // Numpress main-axis values live in a separate byte-array column (not chunkValues).
     // The column is identical for every selected row, so look it up by transform CURIE
@@ -1165,19 +1164,13 @@ export class ChunkLayoutReader extends BaseLayoutReader {
         resultIndex.append(entryIndex);
 
       for (const { name, entry } of this.secondaryFields) {
-        // Struct columns (the grid's {grid_type, parameters, indices}) match no leaf path, so
-        // their schemaIndex is null — key those by field name, or every one after the first
-        // would be skipped as "visited".
-        const visitKey = entry.schemaIndex ?? name;
-        if (visitedCols.has(visitKey)) continue
-        visitedCols.add(visitKey);
+        if (visitedCols.has(entry.schemaIndex)) continue
+        visitedCols.add(entry.schemaIndex);
         const secVec = rootStruct.getChild(name) as Arrow.Vector<
             Arrow.List<Arrow.DataType>
           >;
         let secValues = secVec.get(rowIdx);
         if (secValues == null) continue;
-        // The main axis's own grid column was decoded above (the main-axis switch).
-        if (entry.transform == GRID_ENCODING_CURIE && entry.arrayTypeCURIE === mainAxisCURIE) continue;
         if (entry.transform == NULL_ZERO_CURIE) {
           nullToZero(secValues);
         }
