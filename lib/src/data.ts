@@ -546,7 +546,7 @@ export class DataArraysReaderMeta {
         context,
         arrayIndex,
         new RangeIndex([]),
-        arrayIndex.entries[0].bufferFormat,
+        arrayIndex.entries.filter(e => !e.isIndex())[0].bufferFormat,
       )
     }
   }
@@ -1218,6 +1218,7 @@ export class ChunkLayoutReader extends BaseLayoutReader {
       const result: ColumnMap = {};
       result[indexColName] = resultIndex.finish().toVector();
       for (let e of this.arrayIndex.entries) {
+        if (e.isIndex()) continue
         result[e.arrayName] = e.emptyArrow();
       }
       return result;
@@ -1371,7 +1372,7 @@ export class DataArraysReader {
     if (coordinateRange) {
       iter.setQueryCoordinateRange(coordinateRange);
     }
-    const sortArr = this.arrayIndex.entries.reduce((last, e) =>
+    const sortArr = this.arrayIndex.entries.filter((e) => !e.isIndex()).reduce((last, e) =>
       e.sortingRank != null && e.sortingRank < (last.sortingRank || Infinity)
         ? e
         : last,

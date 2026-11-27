@@ -1,5 +1,5 @@
 
-"https://www.ebi.ac.uk/ols4/api/ontologies/ms/terms/http%253A%252F%252Fpurl.obolibrary.org%252Fobo%252FMS_1000044";
+// example URI: "https://www.ebi.ac.uk/ols4/api/ontologies/ms/terms/http%253A%252F%252Fpurl.obolibrary.org%252Fobo%252FMS_1000044";
 
 export class Ols4OntologyResolver {
   base: string = "https://www.ebi.ac.uk/ols4/api/ontologies";

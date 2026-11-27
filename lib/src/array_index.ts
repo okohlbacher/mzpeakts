@@ -8,6 +8,7 @@ export enum BufferFormat {
   ChunkEncoding = "chunk_encoding",
   ChunkSecondary = "chunk_secondary",
   ChunkTransform = "chunk_transform",
+  Index = "index"
 }
 
 export function bufferFormatFromString(s: string): BufferFormat {
@@ -27,6 +28,8 @@ export function bufferFormatFromString(s: string): BufferFormat {
       return BufferFormat.ChunkSecondary;
     case "chunk_transform":
       return BufferFormat.ChunkTransform;
+    case "index":
+      return BufferFormat.Index;
     default:
       throw new Error(`${s} is not a recognized buffer format`);
   }
@@ -154,6 +157,10 @@ export class ArrayIndexEntry {
     );
   }
 
+  isIndex() {
+    return this.bufferFormat == BufferFormat.Index
+  }
+
   get fieldName() {
     const tokens = this.path.split(".");
     return tokens[tokens.length - 1];
@@ -259,10 +266,13 @@ export class ArrayIndex {
   }
 
   inferBufferFormat(): BufferFormat | null {
-    if (this.entries[0].bufferFormat === BufferFormat.Point) {
+    // The spec's leading "index" entry describes the key column, not the layout.
+    const first = this.entries.find((e) => !e.isIndex());
+    if (first == null) return null;
+    if (first.bufferFormat === BufferFormat.Point) {
       return BufferFormat.Point;
     }
-    switch (this.entries[0].bufferFormat) {
+    switch (first.bufferFormat) {
       case BufferFormat.ChunkEncoding:
       case BufferFormat.ChunkSecondary:
       case BufferFormat.ChunkEnd:

@@ -94,7 +94,12 @@ export class MzPeakReader<T> implements AsyncIterable<Spectrum> {
 
   get fileMetadata() {
     if (this._fileMetadata != undefined) return this._fileMetadata;
-    this._fileMetadata = this.spectrumMetadata?.fileMetadata();
+    // The index is where the spec now requires file-level metadata; older files have it only
+    // in the spectrum metadata Parquet key-value store.
+    const kv = this.spectrumMetadata?.handle?.metadata?.metadata().fileMetadata().keyValueMetadata();
+    this._fileMetadata =
+      FileMetadata.fromIndexMetadata(this.store.fileIndex?.metadata, (k) => kv?.get(k)) ??
+      this.spectrumMetadata?.fileMetadata();
     return this._fileMetadata;
   }
 

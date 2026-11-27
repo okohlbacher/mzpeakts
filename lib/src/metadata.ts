@@ -300,29 +300,37 @@ export class Sample extends ParamDescribed {
 export class MSRun {
   id: string;
   defaultDataProcessingId?: string;
-  defaultInstrumentId?: number;
+  defaultInstrumentConfigurationId?: number;
   defaultSourceFileId?: string;
   startTime?: Date;
 
   constructor(
     id: string,
     defaultDataProcessingId?: string,
-    defaultInstrumentId?: number,
+    defaultInstrumentConfigurationId?: number,
     defaultSourceFileId?: string,
     startTime?: Date,
   ) {
     this.id = id;
     this.defaultDataProcessingId = defaultDataProcessingId;
-    this.defaultInstrumentId = defaultInstrumentId;
+    this.defaultInstrumentConfigurationId = defaultInstrumentConfigurationId;
     this.defaultSourceFileId = defaultSourceFileId;
     this.startTime = startTime;
+  }
+
+  get defaultInstrumentId() {
+    return this.defaultInstrumentConfigurationId;
+  }
+
+  set defaultInstrumentId(value: number | undefined) {
+    this.defaultInstrumentConfigurationId = value;
   }
 
   static fromJSON(raw: any) {
     return new MSRun(
       raw.id,
       raw.default_data_processing_id,
-      raw.default_instrument_id,
+      raw.default_instrument_id || raw.default_instrument_configuration_id,
       raw.default_source_file_id,
       raw.start_time ? new Date(raw.start_time) : undefined,
     );
@@ -359,31 +367,42 @@ export class FileMetadata {
 
   static fromParquet(handle: ParquetFile) {
     const meta = handle.metadata().fileMetadata().keyValueMetadata();
-    let raw = meta.get("file_description");
-    const fileDescription = raw
-      ? FileDescription.fromJSON(JSON.parse(raw))
-      : new FileDescription([], []);
-    raw = meta.get("instrument_configuration_list");
-    const instrumentConfigs = raw
-      ? (JSON.parse(raw) as any[]).map(InstrumentConfiguration.fromJSON)
-      : [];
-    raw = meta.get("data_processing_method_list");
-    const dpMethods = raw
-      ? JSON.parse(raw).map(DataProcessingMethod.fromJSON)
-      : [];
-    raw = meta.get("software_list");
-    const softwares = raw ? JSON.parse(raw).map(Software.fromJSON) : [];
-    raw = meta.get("sample_list");
-    const samples = raw ? JSON.parse(raw).map(Sample.fromJSON) : [];
-    raw = meta.get("run");
-    const run = raw ? MSRun.fromJSON(JSON.parse(raw)) : undefined;
+    return FileMetadata.fromEntries((k) => meta.get(k));
+  }
+
+  /**
+   * From the `mzpeak_index.json` → `metadata` object, where the specification now REQUIRES
+   * file-level metadata to live (the Parquet key-value copy is no longer written), falling back
+   * per block to the Parquet key-value store of older files. Null when neither has any block.
+   */
+  static fromIndexMetadata(metadata: unknown, parquetKv?: (key: string) => unknown): FileMetadata | null {
+    const m = (metadata && typeof metadata === "object" ? metadata : {}) as Record<string, unknown>;
+    const get = (k: string) => m[k] ?? parquetKv?.(k) ?? null;
+    const keys = ["file_description", "instrument_configuration_list", "software_list", "sample_list", "data_processing_method_list", "run"];
+    if (!keys.some((k) => get(k) != null)) return null;
+    return FileMetadata.fromEntries(get);
+  }
+
+  /** Values may be JSON strings (Parquet key-value) or already-parsed objects (the index). A
+   *  block that does not parse (a partial or older shape) is left empty rather than failing the
+   *  file: file-level metadata is descriptive, never needed to read the data. */
+  private static fromEntries(get: (key: string) => unknown) {
+    const block = <T>(key: string, parse: (v: any) => T, empty: T): T => {
+      try {
+        const raw = get(key);
+        if (raw == null) return empty;
+        return parse(typeof raw === "string" ? JSON.parse(raw) : raw);
+      } catch {
+        return empty;
+      }
+    };
     return new FileMetadata(
-      fileDescription,
-      instrumentConfigs,
-      softwares,
-      samples,
-      dpMethods,
-      run,
+      block("file_description", FileDescription.fromJSON, new FileDescription([], [])),
+      block("instrument_configuration_list", (v) => v.map(InstrumentConfiguration.fromJSON), []),
+      block("software_list", (v) => v.map(Software.fromJSON), []),
+      block("sample_list", (v) => v.map(Sample.fromJSON), []),
+      block("data_processing_method_list", (v) => v.map(DataProcessingMethod.fromJSON), []),
+      block<MSRun | undefined>("run", MSRun.fromJSON, undefined),
     );
   }
 }
@@ -497,43 +516,51 @@ abstract class MetadataReaderBase {
   }
 }
 
-
 const parquetHasColumn = (handle: ParquetFile, name: string) => {
-  return handle
-    .metadata()
-    .rowGroup(0)
-    .columns()
-    ?.find((c) => c.columnPath().join(".") == name) != undefined
-}
+  return (
+    handle
+      .metadata()
+      .rowGroup(0)
+      .columns()
+      ?.find((c) => c.columnPath().join(".") == name) != undefined
+  );
+};
 
-
-const parquetColumnStatistics = (handle: ParquetFile, name: string) : {summary: {min_value: any, max_value: any}, rowGroups: any[]} | null => {
-  const meta = handle.metadata()
-  const rowGroups = []
+const parquetColumnStatistics = (
+  handle: ParquetFile,
+  name: string,
+): { summary: { min_value: any; max_value: any }; rowGroups: any[] } | null => {
+  const meta = handle.metadata();
+  const rowGroups = [];
   let colIdx = null;
-  for(let i = 0; i < meta.numRowGroups(); i++) {
+  for (let i = 0; i < meta.numRowGroups(); i++) {
     const rg = meta.rowGroup(i);
     if (colIdx == null) {
-      const foundIdx = rg.columns().findIndex((c) => c.columnPath().join(".") == name);
+      const foundIdx = rg
+        .columns()
+        .findIndex((c) => c.columnPath().join(".") == name);
       if (foundIdx == -1) return null;
       colIdx = foundIdx;
     }
-    const col = rg.column(colIdx)
-    rowGroups.push(col.statistics())
+    const col = rg.column(colIdx);
+    rowGroups.push(col.statistics());
   }
-  const summary = rowGroups.reduce((state: {min_value: any, max_value: any}, colStats) => {
-    return {
-      min_value: state.min_value
-        ? Math.min(state.min_value, colStats.min_value)
-        : colStats.min_value,
-      max_value: state.max_value
-        ? Math.max(state.max_value, colStats.max_value)
-        : colStats.max_value,
-    };
-  }, {min_value: undefined, max_value: undefined})
+  const summary = rowGroups.reduce(
+    (state: { min_value: any; max_value: any }, colStats) => {
+      return {
+        min_value: state.min_value
+          ? Math.min(state.min_value, colStats.min_value)
+          : colStats.min_value,
+        max_value: state.max_value
+          ? Math.max(state.max_value, colStats.max_value)
+          : colStats.max_value,
+      };
+    },
+    { min_value: undefined, max_value: undefined },
+  );
 
-  return {summary, rowGroups}
-}
+  return { summary, rowGroups };
+};
 
 export class ParquetTableNamespace {
   fileIndex: FileIndex;
@@ -571,22 +598,20 @@ export class ParquetTableNamespace {
           ? parquetHasColumn(this.selectedIons, name)
           : false;
       case DataKindTag.Scans:
-        return this.scans
-          ? parquetHasColumn(this.scans, name)
-          : false;
+        return this.scans ? parquetHasColumn(this.scans, name) : false;
       case DataKindTag.Products:
-        return this.products
-          ? parquetHasColumn(this.products, name)
-          : false;
+        return this.products ? parquetHasColumn(this.products, name) : false;
       default:
-        return false
+        return false;
     }
   }
 
   facetColumnMinMaxes(facet: DataKindTag, name: string) {
     switch (facet) {
       case DataKindTag.Metadata:
-        return this.metadata ? parquetColumnStatistics(this.metadata, name) : null;
+        return this.metadata
+          ? parquetColumnStatistics(this.metadata, name)
+          : null;
       case DataKindTag.Precursors:
         return this.precursors
           ? parquetColumnStatistics(this.precursors, name)
@@ -598,7 +623,9 @@ export class ParquetTableNamespace {
       case DataKindTag.Scans:
         return this.scans ? parquetColumnStatistics(this.scans, name) : null;
       case DataKindTag.Products:
-        return this.products ? parquetColumnStatistics(this.products, name) : null;
+        return this.products
+          ? parquetColumnStatistics(this.products, name)
+          : null;
       default:
         return null;
     }
@@ -846,13 +873,30 @@ export class SpectrumMetadata extends MetadataReaderBase {
   loadSpacingModelIndex(): Map<bigint, SpacingInterpolationModel> | null {
     if (this.spectra === null) return null;
     const indexArr = this.spectra.getChildAt(0) as Arrow.Vector<Arrow.Uint64>;
-    let spacingModels = this.spectra.getChild(
-      "mz_delta_model",
-    ) as Arrow.Vector<Arrow.List<Arrow.Float64>> | null;
+    let spacingModels = this.spectra.getChild("mz_delta_model") as Arrow.Vector<
+      Arrow.List<Arrow.Float64>
+    > | null;
     if (spacingModels == null)
-      spacingModels = this.spectra.getChild("coordinate_spacing_model") as Arrow.Vector<
-        Arrow.List<Arrow.Float64>
-      > | null;
+      spacingModels = this.spectra.getChild(
+        "coordinate_spacing_model",
+      ) as Arrow.Vector<Arrow.List<Arrow.Float64>> | null;
+    if (spacingModels == null)
+      spacingModels = this.spectra.getChild(
+        "polynomial_delta_coordinate_interpolation",
+      ) as Arrow.Vector<Arrow.List<Arrow.Float64>> | null;
+    if (spacingModels == null) {
+      // The spec resolves columns by accession (MS:1003821, via the index's column mapping),
+      // so a renamed column is still found — as the Rust and Python readers do.
+      for (const cols of this.handle.metadataMap().values()) {
+        const col = (cols as MetadataColumn[]).find((c) => c.accession === "MS:1003821");
+        if (col) {
+          spacingModels = this.spectra.getChild(col.path[col.path.length - 1]!) as Arrow.Vector<
+            Arrow.List<Arrow.Float64>
+          > | null;
+          if (spacingModels != null) break;
+        }
+      }
+    }
     if (spacingModels == null) return null;
     const modelIndex = new Map();
     for (let i = 0; i < indexArr.length; i++) {
